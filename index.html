@@ -1,0 +1,1134 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Điểm Danh Công Việc Hàng Ngày - VKSND Khu Vực 5 Hải Phòng</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+  <!-- Firebase SDK Compat -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+  <div id="app"></div>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyDGKCjCLQ3dTjktrsbtTfTrbHeE6IhP5d4",
+      authDomain: "grounded-style-452914-j7.firebaseapp.com",
+      projectId: "grounded-style-452914-j7",
+      storageBucket: "grounded-style-452914-j7.firebasestorage.app",
+      messagingSenderId: "878838898371",
+      appId: "1:878838898371:web:5c1e6147322c1473cd8c76",
+      measurementId: "G-EBC1NTLP49"
+    };
+
+    let db = null;
+    let firebaseConnected = false;
+    try {
+      if (window.firebase && firebase.apps && firebase.apps.length === 0) {
+        firebase.initializeApp(firebaseConfig);
+      }
+      if (window.firebase && firebase.firestore) {
+        db = firebase.firestore();
+        firebaseConnected = true;
+      }
+    } catch (e) {
+      console.error("Firebase init error:", e);
+    }
+
+    const TASKS = [
+      {
+        id: "qlvb",
+        title: "Đăng nhập Phần mềm Quản lý văn bản",
+        desc: "Kiểm tra văn bản đến, văn bản chỉ đạo và xử lý hồ sơ hành chính.",
+        url: "https://qlvb.vksndtc.gov.vn/qlvbdh/main?lang=vi",
+        hasVault: true
+      },
+      {
+        id: "pmcv",
+        title: "Đăng nhập Phần mềm Quản lý công việc",
+        desc: "Cập nhật tiến độ công việc được giao trên Bàn làm việc số.",
+        url: "https://banlamviecso.vksndtc.gov.vn/dashboard/",
+        hasVault: true
+      },
+      {
+        id: "luyenai",
+        title: "Đăng nhập Phần mềm Luyện AI",
+        desc: "Thực hành trợ lý ảo, tra cứu và ứng dụng AI trong công tác kiểm sát.",
+        url: "https://banlamviecso.vksndtc.gov.vn/dashboard/",
+        hasVault: true
+      },
+      {
+        id: "rasoatan",
+        title: "Rà soát án quá hạn",
+        desc: "Kiểm tra thời hạn tạm giam, điều tra, truy tố, xét xử và nhập báo cáo kết quả.",
+        url: null,
+        hasVault: false,
+        isInputTask: true
+      }
+    ];
+
+    const todayStr = () => {
+      const d = new Date();
+      return d.toISOString().split("T")[0];
+    };
+
+    let state = {
+      currentUser: JSON.parse(localStorage.getItem("vks_current_user") || "null"),
+      authMode: "login",
+      activeTab: "checkin",
+      selectedDate: todayStr(),
+      adminFilter: "all",
+      adminSearch: "",
+      users: JSON.parse(localStorage.getItem("vks_users") || "[]"),
+      checkins: JSON.parse(localStorage.getItem("vks_checkins") || "{}"),
+      vault: {},
+      showPasswords: {},
+      toast: null
+    };
+
+    if (state.currentUser) {
+      loadVaultForUser(state.currentUser.username);
+    }
+
+    function showToast(msg, type = "success") {
+      state.toast = { msg, type };
+      render();
+      setTimeout(() => {
+        state.toast = null;
+        render();
+      }, 3200);
+    }
+
+    function saveLocal() {
+      localStorage.setItem("vks_users", JSON.stringify(state.users));
+      localStorage.setItem("vks_checkins", JSON.stringify(state.checkins));
+      if (state.currentUser) {
+        localStorage.setItem("vks_current_user", JSON.stringify(state.currentUser));
+      } else {
+        localStorage.removeItem("vks_current_user");
+      }
+    }
+
+    function saveVault() {
+      if (!state.currentUser) return;
+      const allVaults = JSON.parse(localStorage.getItem("vks_vault_by_user") || "{}");
+      allVaults[state.currentUser.username] = state.vault;
+      localStorage.setItem("vks_vault_by_user", JSON.stringify(allVaults));
+    }
+
+    function loadVaultForUser(username) {
+      const allVaults = JSON.parse(localStorage.getItem("vks_vault_by_user") || "{}");
+      state.vault = allVaults[username] || {
+        qlvb: { url: "https://qlvb.vksndtc.gov.vn/qlvbdh/main?lang=vi", user: "", pass: "" },
+        pmcv: { url: "https://banlamviecso.vksndtc.gov.vn/dashboard/", user: "", pass: "" },
+        luyenai: { url: "https://banlamviecso.vksndtc.gov.vn/dashboard/", user: "", pass: "" }
+      };
+    }
+
+    if (firebaseConnected && db) {
+      try {
+        db.collection("users").onSnapshot((snap) => {
+          const list = [];
+          snap.forEach((d) => list.push(d.data()));
+          state.users = list;
+          if (state.currentUser) {
+            const updatedMe = list.find(u => u.username === state.currentUser.username);
+            if (updatedMe) state.currentUser = updatedMe;
+          }
+          saveLocal();
+          render();
+        }, (err) => {
+          console.warn("Firestore users sync fallback:", err.message);
+        });
+
+        db.collection("checkins").onSnapshot((snap) => {
+          const map = {};
+          snap.forEach((d) => {
+            map[d.id] = d.data();
+          });
+          state.checkins = map;
+          saveLocal();
+          render();
+        }, (err) => {
+          console.warn("Firestore checkins sync fallback:", err.message);
+        });
+      } catch (err) {
+        console.warn("Snapshot setup error:", err);
+      }
+    }
+
+    async function syncUserToCloud(userObj) {
+      const idx = state.users.findIndex(u => u.username === userObj.username);
+      if (idx >= 0) state.users[idx] = userObj;
+      else state.users.push(userObj);
+      saveLocal();
+      if (firebaseConnected && db) {
+        try {
+          await db.collection("users").doc(userObj.username).set(userObj);
+        } catch (e) {
+          console.warn("Cloud user save failed:", e);
+        }
+      }
+    }
+
+    async function deleteUserFromCloud(username) {
+      state.users = state.users.filter(u => u.username !== username);
+      saveLocal();
+      if (firebaseConnected && db) {
+        try {
+          await db.collection("users").doc(username).delete();
+        } catch (e) {
+          console.warn("Cloud user delete failed:", e);
+        }
+      }
+    }
+
+    async function syncCheckinToCloud(key, record) {
+      state.checkins[key] = record;
+      saveLocal();
+      if (firebaseConnected && db) {
+        try {
+          await db.collection("checkins").doc(key).set(record);
+        } catch (e) {
+          console.warn("Cloud checkin save failed:", e);
+        }
+      }
+    }
+
+    function getRecord(username, date) {
+      const key = `${username}_${date}`;
+      return state.checkins[key] || {
+        username,
+        date,
+        tasks: {
+          qlvb: { done: false, time: "" },
+          pmcv: { done: false, time: "" },
+          luyenai: { done: false, time: "" },
+          rasoatan: { done: false, time: "", note: "" }
+        },
+        updatedAt: ""
+      };
+    }
+
+    function nowTimeStr() {
+      const d = new Date();
+      return d.toTimeString().slice(0, 5);
+    }
+
+    function countDone(rec) {
+      if (!rec || !rec.tasks) return 0;
+      return TASKS.filter(t => rec.tasks[t.id]?.done).length;
+    }
+
+    function getStreak(username) {
+      let streak = 0;
+      const d = new Date();
+      for (let i = 0; i < 60; i++) {
+        const dt = new Date(d);
+        dt.setDate(d.getDate() - i);
+        const ds = dt.toISOString().split("T")[0];
+        const rec = state.checkins[`${username}_${ds}`];
+        if (countDone(rec) === 4) {
+          streak++;
+        } else if (i === 0) {
+          continue;
+        } else {
+          break;
+        }
+      }
+      return streak;
+    }
+
+    function hasExistingAdmin() {
+      return state.users.some(u => u.role === "admin");
+    }
+
+    window.switchAuthMode = (mode) => {
+      state.authMode = mode;
+      render();
+    };
+
+    window.handleLogin = async (e) => {
+      e.preventDefault();
+      const username = document.getElementById("loginUser").value.trim().toLowerCase();
+      const password = document.getElementById("loginPass").value;
+      const remember = document.getElementById("rememberMe").checked;
+
+      if (!username || !password) {
+        showToast("Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu", "error");
+        return;
+      }
+
+      let allUsers = [...state.users];
+      if (firebaseConnected && db) {
+        try {
+          const allSnap = await db.collection("users").get();
+          allUsers = [];
+          allSnap.forEach(d => allUsers.push(d.data()));
+          state.users = allUsers;
+          saveLocal();
+        } catch (err) {}
+      }
+
+      const found = allUsers.find(u => u.username === username && u.password === password);
+      if (!found) {
+        showToast("Sai tên đăng nhập hoặc mật khẩu!", "error");
+        return;
+      }
+
+      const existingAdmin = allUsers.find(u => u.role === "admin");
+      if (!existingAdmin) {
+        found.role = "admin";
+        found.isFirstAdmin = true;
+        await syncUserToCloud(found);
+        showToast(`Chào mừng ${found.fullName}! Bạn là người đầu tiên nên được cấp quyền Admin duy nhất.`);
+      } else if (found.role === "admin" && existingAdmin.username !== found.username) {
+        found.role = "user";
+        await syncUserToCloud(found);
+        showToast(`Chào mừng đồng chí ${found.fullName}!`);
+      } else {
+        showToast(`Chào mừng đồng chí ${found.fullName}!`);
+      }
+
+      if (remember) {
+        localStorage.setItem("vks_saved_cred", JSON.stringify({ username, password }));
+      } else {
+        localStorage.removeItem("vks_saved_cred");
+      }
+
+      state.currentUser = found;
+      state.activeTab = "checkin";
+      loadVaultForUser(found.username);
+      saveLocal();
+      render();
+    };
+
+    window.handleRegister = async (e) => {
+      e.preventDefault();
+      const fullName = document.getElementById("regName").value.trim();
+      const position = document.getElementById("regPos").value.trim() || "Kiểm sát viên";
+      const username = document.getElementById("regUser").value.trim().toLowerCase();
+      const password = document.getElementById("regPass").value;
+
+      if (!fullName || !username || !password) {
+        showToast("Vui lòng điền đầy đủ thông tin bắt buộc", "error");
+        return;
+      }
+      if (/\s/.test(username)) {
+        showToast("Tên đăng nhập không được chứa dấu cách", "error");
+        return;
+      }
+
+      let cloudUsers = [...state.users];
+      if (firebaseConnected && db) {
+        try {
+          const snap = await db.collection("users").get();
+          cloudUsers = [];
+          snap.forEach(d => cloudUsers.push(d.data()));
+          state.users = cloudUsers;
+        } catch (err) {
+          console.warn("Could not verify cloud users:", err);
+        }
+      }
+
+      if (cloudUsers.some(u => u.username === username)) {
+        showToast("Tên đăng nhập đã tồn tại, vui lòng chọn tên khác", "error");
+        return;
+      }
+
+      const isFirstUser = cloudUsers.length === 0 && !cloudUsers.some(u => u.role === "admin");
+      const assignedRole = isFirstUser ? "admin" : "user";
+
+      const newUser = {
+        username,
+        password,
+        fullName,
+        position,
+        role: assignedRole,
+        isFirstAdmin: isFirstUser,
+        createdAt: new Date().toISOString()
+      };
+
+      await syncUserToCloud(newUser);
+      state.currentUser = newUser;
+      state.activeTab = "checkin";
+      loadVaultForUser(username);
+      saveLocal();
+
+      if (isFirstUser) {
+        showToast("Đăng ký thành công! Bạn là người đầu tiên nên được cấp quyền Quản trị viên (Admin) duy nhất.");
+      } else {
+        showToast("Đăng ký tài khoản Cán bộ thành công!");
+      }
+      render();
+    };
+
+    window.handleLogout = () => {
+      state.currentUser = null;
+      saveLocal();
+      render();
+    };
+
+    window.setTab = (tab) => {
+      if (tab === "admin" && state.currentUser?.role !== "admin") {
+        showToast("Bạn không có quyền truy cập khu vực Quản trị!", "error");
+        return;
+      }
+      state.activeTab = tab;
+      render();
+    };
+
+    window.changeDate = (val) => {
+      state.selectedDate = val;
+      render();
+    };
+
+    window.toggleTask = async (taskId) => {
+      if (!state.currentUser) return;
+      const key = `${state.currentUser.username}_${state.selectedDate}`;
+      const rec = JSON.parse(JSON.stringify(getRecord(state.currentUser.username, state.selectedDate)));
+      const cur = rec.tasks[taskId]?.done || false;
+      rec.tasks[taskId] = {
+        ...rec.tasks[taskId],
+        done: !cur,
+        time: !cur ? nowTimeStr() : ""
+      };
+      rec.fullName = state.currentUser.fullName;
+      rec.position = state.currentUser.position;
+      rec.updatedAt = nowTimeStr();
+      await syncCheckinToCloud(key, rec);
+      render();
+    };
+
+    window.saveReviewNote = async (markDone = false) => {
+      if (!state.currentUser) return;
+      const noteEl = document.getElementById("rasoatNoteInput");
+      const noteVal = noteEl ? noteEl.value.trim() : "";
+      const key = `${state.currentUser.username}_${state.selectedDate}`;
+      const rec = JSON.parse(JSON.stringify(getRecord(state.currentUser.username, state.selectedDate)));
+      const isDone = markDone ? true : (rec.tasks.rasoatan?.done || false);
+      rec.tasks.rasoatan = {
+        done: isDone,
+        time: isDone ? (rec.tasks.rasoatan?.time || nowTimeStr()) : "",
+        note: noteVal
+      };
+      rec.fullName = state.currentUser.fullName;
+      rec.position = state.currentUser.position;
+      rec.updatedAt = nowTimeStr();
+      await syncCheckinToCloud(key, rec);
+      showToast(markDone ? "Đã lưu kết quả & điểm danh Rà soát án!" : "Đã cập nhật ghi chú rà soát án!");
+      render();
+    };
+
+    window.quickNoOverdue = async () => {
+      const noteEl = document.getElementById("rasoatNoteInput");
+      if (noteEl) noteEl.value = "Đã rà soát toàn bộ hồ sơ đang thụ lý: Không có án quá hạn tạm giam, điều tra, truy tố, xét xử.";
+      await window.saveReviewNote(true);
+    };
+
+    window.updateVaultItem = (id, field, value) => {
+      if (!state.vault[id]) state.vault[id] = {};
+      state.vault[id][field] = value;
+      saveVault();
+    };
+
+    window.toggleShowPass = (id) => {
+      state.showPasswords[id] = !state.showPasswords[id];
+      render();
+    };
+
+    window.copyText = (text, label = "nội dung") => {
+      if (!text) {
+        showToast(`Chưa có ${label} để sao chép`, "error");
+        return;
+      }
+      navigator.clipboard.writeText(text);
+      showToast(`Đã sao chép ${label}!`);
+    };
+
+    window.copyDailyReport = () => {
+      const u = state.currentUser;
+      const rec = getRecord(u.username, state.selectedDate);
+      const doneCount = countDone(rec);
+      const NL = String.fromCharCode(10);
+      const lines = [
+        "BÁO CÁO ĐIỂM DANH CÔNG VIỆC HÀNG NGÀY",
+        `- Cán bộ: ${u.fullName} (${u.position})`,
+        `- Ngày: ${state.selectedDate.split("-").reverse().join("/")}`,
+        `- Tiến độ hoàn thành: ${doneCount}/4 hạng mục`,
+        `1. Quản lý văn bản: ${rec.tasks.qlvb?.done ? `Đã xong (${rec.tasks.qlvb.time})` : "Chưa thực hiện"}`,
+        `2. Quản lý công việc: ${rec.tasks.pmcv?.done ? `Đã xong (${rec.tasks.pmcv.time})` : "Chưa thực hiện"}`,
+        `3. Luyện AI: ${rec.tasks.luyenai?.done ? `Đã xong (${rec.tasks.luyenai.time})` : "Chưa thực hiện"}`,
+        `4. Rà soát án quá hạn: ${rec.tasks.rasoatan?.done ? `Đã xong (${rec.tasks.rasoatan.time})` : "Chưa thực hiện"}`,
+        rec.tasks.rasoatan?.note ? `   -> Kết quả rà soát: ${rec.tasks.rasoatan.note}` : ""
+      ].filter(Boolean).join(NL);
+
+      navigator.clipboard.writeText(lines);
+      showToast("Đã sao chép báo cáo ngày để dán vào Zalo!");
+    };
+
+    window.exportPersonalCSV = () => {
+      const u = state.currentUser;
+      const monthPrefix = state.selectedDate.slice(0, 7);
+      const rows = [["Ngày", "Cán bộ", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tổng đạt"]];
+      Object.values(state.checkins)
+        .filter(r => r.username === u.username && r.date.startsWith(monthPrefix))
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .forEach(r => {
+          rows.push([
+            r.date,
+            u.fullName,
+            r.tasks.qlvb?.done ? `X (${r.tasks.qlvb.time})` : "",
+            r.tasks.pmcv?.done ? `X (${r.tasks.pmcv.time})` : "",
+            r.tasks.luyenai?.done ? `X (${r.tasks.luyenai.time})` : "",
+            r.tasks.rasoatan?.done ? `X (${r.tasks.rasoatan.time})` : "",
+            `"${(r.tasks.rasoatan?.note || "").replace(/"/g, '""')}"`,
+            `${countDone(r)}/4`
+          ]);
+        });
+      downloadCSV(rows, `DiemDanh_${u.username}_${monthPrefix}.csv`);
+    };
+
+    window.exportAdminCSV = () => {
+      if (state.currentUser?.role !== "admin") return;
+      const rows = [["Ngày", "Họ và tên", "Chức vụ", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tiến độ"]];
+      state.users.forEach(u => {
+        const r = getRecord(u.username, state.selectedDate);
+        rows.push([
+          state.selectedDate,
+          u.fullName,
+          u.position,
+          r.tasks.qlvb?.done ? `X (${r.tasks.qlvb.time})` : "Chưa",
+          r.tasks.pmcv?.done ? `X (${r.tasks.pmcv.time})` : "Chưa",
+          r.tasks.luyenai?.done ? `X (${r.tasks.luyenai.time})` : "Chưa",
+          r.tasks.rasoatan?.done ? `X (${r.tasks.rasoatan.time})` : "Chưa",
+          `"${(r.tasks.rasoatan?.note || "").replace(/"/g, '""')}"`,
+          `${countDone(r)}/4`
+        ]);
+      });
+      downloadCSV(rows, `TongHop_VKSKV5_${state.selectedDate}.csv`);
+    };
+
+    window.copyAdminSummary = () => {
+      if (state.currentUser?.role !== "admin") return;
+      const total = state.users.length;
+      let full = 0, partial = 0, none = 0;
+      const incompleteNames = [];
+      const overdueNotes = [];
+      const NL = String.fromCharCode(10);
+
+      state.users.forEach(u => {
+        const r = getRecord(u.username, state.selectedDate);
+        const c = countDone(r);
+        if (c === 4) full++;
+        else if (c > 0) {
+          partial++;
+          incompleteNames.push(`${u.fullName} (${c}/4)`);
+        } else {
+          none++;
+          incompleteNames.push(`${u.fullName} (0/4)`);
+        }
+        if (r.tasks.rasoatan?.note) {
+          overdueNotes.push(`- ${u.fullName}: ${r.tasks.rasoatan.note}`);
+        }
+      });
+
+      const report = [
+        "TỔNG HỢP ĐIỂM DANH CÔNG VIỆC - VKSND KHU VỰC 5 HẢI PHÒNG",
+        `Ngày: ${state.selectedDate.split("-").reverse().join("/")}`,
+        `- Tổng quân số trên hệ thống: ${total} đ/c`,
+        `- Hoàn thành đủ 4/4 mục: ${full} đ/c`,
+        `- Đang thực hiện (1-3/4): ${partial} đ/c`,
+        `- Chưa điểm danh: ${none} đ/c`,
+        incompleteNames.length ? `${NL}Danh sách chưa hoàn thành đủ:${NL}• ${incompleteNames.join(`${NL}• `)}` : `${NL}100% cán bộ đã hoàn thành đủ các hạng mục!`,
+        overdueNotes.length ? `${NL}Ghi nhận rà soát án:${NL}${overdueNotes.join(NL)}` : ""
+      ].filter(Boolean).join(NL);
+
+      navigator.clipboard.writeText(report);
+      showToast("Đã sao chép báo cáo tổng hợp đơn vị!");
+    };
+
+    window.setAdminFilter = (f) => { state.adminFilter = f; render(); };
+    window.setAdminSearch = (v) => { state.adminSearch = v; render(); };
+
+    window.removeUser = async (username) => {
+      if (state.currentUser?.role !== "admin") return;
+      if (username === state.currentUser.username) {
+        showToast("Không thể xóa tài khoản Admin duy nhất của hệ thống", "error");
+        return;
+      }
+      if (!confirm(`Xác nhận xóa tài khoản "${username}" khỏi danh sách đơn vị?`)) return;
+      await deleteUserFromCloud(username);
+      showToast("Đã xóa tài khoản cán bộ");
+      render();
+    };
+
+    function downloadCSV(rows, filename) {
+      const NL = String.fromCharCode(10);
+      const BOM = String.fromCharCode(0xFEFF);
+      const csvContent = BOM + rows.map(e => e.join(",")).join(NL);
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Đã tải xuống ${filename}`);
+    }
+
+    function renderMonthCalendar(username) {
+      const [y, m] = state.selectedDate.split("-").map(Number);
+      const daysInMonth = new Date(y, m, 0).getDate();
+      let cells = "";
+      for (let day = 1; day <= daysInMonth; day++) {
+        const ds = `${y}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        const rec = state.checkins[`${username}_${ds}`];
+        const c = countDone(rec);
+        const isSel = ds === state.selectedDate;
+        let bg = "bg-slate-100 text-slate-600 hover:bg-slate-200";
+        if (c === 4) bg = "bg-emerald-500 text-white font-semibold";
+        else if (c > 0) bg = "bg-amber-400 text-slate-900 font-semibold";
+
+        cells += `
+          <button onclick="changeDate('${ds}')"
+            class="h-9 rounded-lg text-xs flex flex-col items-center justify-center transition ${bg} ${isSel ? 'ring-2 ring-blue-600 ring-offset-1' : ''}"
+            title="Ngày ${day}/${m}: ${c}/4 mục">
+            <span>${day}</span>
+          </button>
+        `;
+      }
+      return cells;
+    }
+
+    function renderAuth() {
+      const savedCred = JSON.parse(localStorage.getItem("vks_saved_cred") || "null");
+      const adminAlreadyExists = state.users.length > 0 || hasExistingAdmin();
+
+      return `
+        <div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900">
+          <div class="w-full max-w-md bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-200">
+            <div class="bg-blue-900 px-6 py-6 text-white text-center">
+              <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-amber-400/20 border border-amber-300/40 text-amber-300 font-bold text-xl mb-3">
+                VKS
+              </div>
+              <h1 class="text-lg font-bold tracking-tight uppercase">VKSND Khu Vực 5 - Hải Phòng</h1>
+              <p class="text-blue-200 text-xs mt-1">Hệ thống Điểm danh Công việc & Rà soát án hàng ngày</p>
+              <div class="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-blue-950/70 border border-blue-700/50">
+                <span class="w-2 h-2 rounded-full ${firebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}"></span>
+                <span>${firebaseConnected ? 'Đã kết nối máy chủ Cloud đồng bộ' : 'Chế độ lưu trữ cục bộ'}</span>
+              </div>
+            </div>
+
+            <div class="flex border-b border-slate-200 bg-slate-50">
+              <button onclick="switchAuthMode('login')"
+                class="flex-1 py-3 text-sm font-semibold transition ${state.authMode === 'login' ? 'text-blue-800 border-b-2 border-blue-800 bg-white' : 'text-slate-500 hover:text-slate-700'}">
+                Đăng nhập
+              </button>
+              <button onclick="switchAuthMode('register')"
+                class="flex-1 py-3 text-sm font-semibold transition ${state.authMode === 'register' ? 'text-blue-800 border-b-2 border-blue-800 bg-white' : 'text-slate-500 hover:text-slate-700'}">
+                Đăng ký tài khoản mới
+              </button>
+            </div>
+
+            <div class="p-6">
+              ${state.authMode === "login" ? `
+                <form onsubmit="handleLogin(event)" class="space-y-4">
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Tên đăng nhập</label>
+                    <input id="loginUser" type="text" value="${savedCred?.username || ''}" placeholder="Ví dụ: buivietdung"
+                      class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" required />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Mật khẩu</label>
+                    <input id="loginPass" type="password" value="${savedCred?.password || ''}" placeholder="Nhập mật khẩu"
+                      class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" required />
+                  </div>
+                  <div class="flex items-center justify-between">
+                    <label class="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                      <input id="rememberMe" type="checkbox" ${savedCred ? 'checked' : ''} class="rounded text-blue-700 focus:ring-blue-600" />
+                      <span>Lưu mật khẩu trên thiết bị này</span>
+                    </label>
+                  </div>
+                  <button type="submit"
+                    class="w-full py-2.5 px-4 bg-blue-800 hover:bg-blue-900 text-white font-semibold rounded-xl text-sm shadow-md transition">
+                    Đăng nhập hệ thống
+                  </button>
+                  <p class="text-center text-xs text-slate-500 pt-1">
+                    Chưa có tài khoản trên hệ thống? Bấm sang tab <strong>Đăng ký tài khoản mới</strong> ở trên để khởi tạo.
+                  </p>
+                </form>
+              ` : `
+                <form onsubmit="handleRegister(event)" class="space-y-3.5">
+                  ${!adminAlreadyExists ? `
+                    <div class="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900">
+                      <strong>Khởi tạo Quản trị viên đầu tiên:</strong> Hệ thống hiện chưa có tài khoản nào. Tài khoản đăng ký đầu tiên này sẽ tự động được cấp quyền <strong>Admin duy nhất</strong> của đơn vị.
+                    </div>
+                  ` : `
+                    <div class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-900">
+                      Hệ thống đã xác lập Quản trị viên (Admin). Tất cả tài khoản đăng ký mới sẽ tự động nhận quyền <strong>Cán bộ / KSV</strong>.
+                    </div>
+                  `}
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Họ và tên cán bộ *</label>
+                    <input id="regName" type="text" placeholder="Ví dụ: Bùi Việt Dũng"
+                      class="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" required />
+                  </div>
+                  <div>
+                    <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Chức danh / Chức vụ</label>
+                    <input id="regPos" type="text" placeholder="Kiểm sát viên"
+                      class="w-full px-3.5 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" />
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Tên đăng nhập *</label>
+                      <input id="regUser" type="text" placeholder="viết liền không dấu"
+                        class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" required />
+                    </div>
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Mật khẩu *</label>
+                      <input id="regPass" type="password" placeholder="Tạo mật khẩu"
+                        class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-600" required />
+                    </div>
+                  </div>
+                  <button type="submit"
+                    class="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-semibold rounded-xl text-sm shadow-md transition">
+                    ${!adminAlreadyExists ? 'Tạo tài khoản Admin đầu tiên' : 'Tạo tài khoản Cán bộ & Vào làm việc'}
+                  </button>
+                </form>
+              `}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderCheckinTab() {
+      const u = state.currentUser;
+      const rec = getRecord(u.username, state.selectedDate);
+      const doneCount = countDone(rec);
+      const pct = Math.round((doneCount / 4) * 100);
+      const streak = getStreak(u.username);
+
+      return `
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div class="lg:col-span-2 space-y-4">
+            <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+              <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
+                <div>
+                  <h2 class="text-base font-bold text-slate-800">Bảng Điểm Danh Nhiệm Vụ Ngày</h2>
+                  <p class="text-xs text-slate-500 mt-0.5">Tích hoàn thành từng hạng mục sau khi thực hiện xong trên phần mềm</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <input type="date" value="${state.selectedDate}" onchange="changeDate(this.value)"
+                    class="px-3 py-1.5 rounded-xl border border-slate-300 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-600" />
+                  <button onclick="changeDate('${todayStr()}')"
+                    class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
+                    Hôm nay
+                  </button>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between text-xs font-semibold mb-1.5">
+                <span class="${doneCount === 4 ? 'text-emerald-700' : 'text-blue-800'}">
+                  Tiến độ hoàn thành: ${doneCount}/4 hạng mục (${pct}%)
+                </span>
+                <span class="text-slate-500">Chuỗi đạt 4/4: <strong class="text-amber-600">${streak} ngày</strong></span>
+              </div>
+              <div class="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                <div class="h-full transition-all duration-300 ${doneCount === 4 ? 'bg-emerald-500' : 'bg-blue-700'}" style="width: ${pct}%"></div>
+              </div>
+            </div>
+
+            <div class="space-y-3">
+              ${TASKS.map((t, idx) => {
+                const tData = rec.tasks[t.id] || { done: false, time: "", note: "" };
+                const vData = state.vault[t.id] || {};
+                return `
+                  <div class="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border transition ${tData.done ? 'border-emerald-300 bg-emerald-50/20' : 'border-slate-200'}">
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="flex items-start gap-3.5">
+                        <button onclick="toggleTask('${t.id}')"
+                          class="mt-0.5 w-6 h-6 rounded-lg flex items-center justify-center border-2 transition shrink-0 ${tData.done ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-300 hover:border-blue-600 bg-white'}">
+                          ${tData.done ? '✓' : ''}
+                        </button>
+                        <div>
+                          <div class="flex flex-wrap items-center gap-2">
+                            <span class="text-xs font-bold px-2 py-0.5 rounded bg-slate-100 text-slate-600">#${idx + 1}</span>
+                            <h3 class="font-bold text-sm sm:text-base ${tData.done ? 'text-emerald-900' : 'text-slate-800'}">${t.title}</h3>
+                            ${tData.done && tData.time ? `<span class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Đã xong lúc ${tData.time}</span>` : ''}
+                          </div>
+                          <p class="text-xs text-slate-500 mt-1">${t.desc}</p>
+                        </div>
+                      </div>
+
+                      ${t.url ? `
+                        <a href="${vData.url || t.url}" target="_blank" rel="noopener noreferrer"
+                          class="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold border border-blue-200 transition">
+                          <span>Mở web</span>
+                          <span>↗</span>
+                        </a>
+                      ` : ''}
+                    </div>
+
+                    ${t.hasVault && (vData.user || vData.pass) ? `
+                      <div class="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center gap-2 text-xs">
+                        <span class="text-slate-400">Tài khoản đã lưu:</span>
+                        ${vData.user ? `<button onclick="copyText('${vData.user}', 'tên đăng nhập')" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 font-mono text-slate-700">Copy User: ${vData.user}</button>` : ''}
+                        ${vData.pass ? `<button onclick="copyText('${vData.pass}', 'mật khẩu')" class="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 font-mono text-slate-700">Copy Mật khẩu</button>` : ''}
+                      </div>
+                    ` : ''}
+
+                    ${t.isInputTask ? `
+                      <div class="mt-3.5 pt-3 border-t border-slate-100 space-y-2.5">
+                        <label class="block text-xs font-semibold text-slate-700">Nội dung / Kết quả rà soát án quá hạn trong ngày:</label>
+                        <textarea id="rasoatNoteInput" rows="2" placeholder="Nhập tình hình rà soát thời hạn tạm giam, điều tra, truy tố, xét xử (ví dụ: Đã rà soát 12 vụ/18 bị can, không có án quá hạn)..."
+                          class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs sm:text-sm focus:outline-none focus:ring-2 focus:ring-blue-600">${tData.note || ''}</textarea>
+                        <div class="flex flex-wrap items-center gap-2">
+                          <button onclick="saveReviewNote(true)"
+                            class="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition">
+                            Lưu kết quả & Điểm danh mục #4
+                          </button>
+                          <button onclick="quickNoOverdue()"
+                            class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
+                            Điền nhanh: Không có án quá hạn
+                          </button>
+                        </div>
+                      </div>
+                    ` : ''}
+                  </div>
+                `;
+              }).join("")}
+            </div>
+          </div>
+
+          <div class="space-y-4">
+            <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-sm font-bold text-slate-800">Lịch theo dõi tháng ${state.selectedDate.slice(5, 7)}/${state.selectedDate.slice(0, 4)}</h3>
+              </div>
+              <div class="grid grid-cols-7 gap-1.5 mb-3">
+                ${renderMonthCalendar(u.username)}
+              </div>
+              <div class="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-100">
+                <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded bg-emerald-500 inline-block"></i> Đủ 4/4</span>
+                <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded bg-amber-400 inline-block"></i> Làm thiếu</span>
+                <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded bg-slate-200 inline-block"></i> Trống</span>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 space-y-2.5">
+              <h3 class="text-sm font-bold text-slate-800">Báo cáo & Xuất dữ liệu</h3>
+              <p class="text-xs text-slate-500">Sao chép nhanh kết quả ngày để gửi nhóm Zalo hoặc xuất bảng thống kê cá nhân.</p>
+              <button onclick="copyDailyReport()"
+                class="w-full py-2.5 px-4 rounded-xl bg-blue-800 hover:bg-blue-900 text-white text-xs font-semibold transition flex items-center justify-center gap-2">
+                <span>Copy báo cáo ngày (Zalo)</span>
+              </button>
+              <button onclick="exportPersonalCSV()"
+                class="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold transition flex items-center justify-center gap-2">
+                <span>Xuất file Excel / CSV tháng</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderVaultTab() {
+      const vaultTasks = TASKS.filter(t => t.hasVault);
+      return `
+        <div class="max-w-4xl mx-auto space-y-4">
+          <div class="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+            <span class="text-amber-600 font-bold text-base">🔒</span>
+            <div class="text-xs text-amber-900 leading-relaxed">
+              <strong>Bảo mật riêng tư tuyệt đối:</strong> Toàn bộ tài khoản và mật khẩu phần mềm nghiệp vụ dưới đây chỉ được lưu cục bộ trên trình duyệt máy tính/điện thoại của riêng đồng chí, <strong>không</strong> đồng bộ lên máy chủ chung.
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            ${vaultTasks.map(t => {
+              const v = state.vault[t.id] || { url: t.url, user: "", pass: "" };
+              const showP = !!state.showPasswords[t.id];
+              return `
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 flex flex-col justify-between space-y-4">
+                  <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                      <h3 class="font-bold text-sm text-slate-800">${t.title.replace("Đăng nhập ", "")}</h3>
+                      <a href="${v.url || t.url}" target="_blank" rel="noopener noreferrer"
+                        class="text-xs font-semibold text-blue-700 hover:underline">Mở web ↗</a>
+                    </div>
+                    <div>
+                      <label class="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Đường dẫn truy cập</label>
+                      <input type="text" value="${v.url || t.url}" onchange="updateVaultItem('${t.id}', 'url', this.value)"
+                        class="w-full px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-600 bg-slate-50" />
+                    </div>
+                    <div>
+                      <label class="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Tên đăng nhập</label>
+                      <div class="flex gap-1.5">
+                        <input type="text" value="${v.user || ''}" oninput="updateVaultItem('${t.id}', 'user', this.value)" placeholder="Nhập tài khoản..."
+                          class="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono" />
+                        <button onclick="copyText(state.vault['${t.id}']?.user, 'tài khoản')"
+                          class="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs font-semibold">Copy</button>
+                      </div>
+                    </div>
+                    <div>
+                      <label class="block text-[11px] font-semibold text-slate-500 uppercase mb-1">Mật khẩu</label>
+                      <div class="flex gap-1.5">
+                        <input type="${showP ? 'text' : 'password'}" value="${v.pass || ''}" oninput="updateVaultItem('${t.id}', 'pass', this.value)" placeholder="Nhập mật khẩu..."
+                          class="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs font-mono" />
+                        <button onclick="toggleShowPass('${t.id}')"
+                          class="px-2 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-xs">${showP ? 'Ẩn' : 'Hiện'}</button>
+                        <button onclick="copyText(state.vault['${t.id}']?.pass, 'mật khẩu')"
+                          class="px-2.5 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 text-blue-800 text-xs font-semibold">Copy</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderAdminTab() {
+      const total = state.users.length;
+      let completeCount = 0;
+      let incompleteCount = 0;
+      let noneCount = 0;
+
+      const enriched = state.users.map(u => {
+        const rec = getRecord(u.username, state.selectedDate);
+        const done = countDone(rec);
+        if (done === 4) completeCount++;
+        else if (done > 0) incompleteCount++;
+        else noneCount++;
+        return { ...u, rec, done };
+      });
+
+      const filtered = enriched.filter(item => {
+        if (state.adminFilter === "complete" && item.done !== 4) return false;
+        if (state.adminFilter === "incomplete" && (item.done === 0 || item.done === 4)) return false;
+        if (state.adminFilter === "none" && item.done !== 0) return false;
+        if (state.adminSearch) {
+          const q = state.adminSearch.toLowerCase();
+          if (!item.fullName.toLowerCase().includes(q) && !item.username.toLowerCase().includes(q)) return false;
+        }
+        return true;
+      });
+
+      return `
+        <div class="space-y-5">
+          <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div>
+                <h2 class="text-base font-bold text-slate-800">Bảng Điều Hành Quản Trị Đơn Vị</h2>
+                <p class="text-xs text-slate-500">Giám sát tiến độ điểm danh 4 hạng mục và kết quả rà soát án toàn đơn vị theo thời gian thực</p>
+              </div>
+              <div class="flex flex-wrap items-center gap-2">
+                <input type="date" value="${state.selectedDate}" onchange="changeDate(this.value)"
+                  class="px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700" />
+                <button onclick="copyAdminSummary()"
+                  class="px-3.5 py-1.5 rounded-xl bg-blue-800 hover:bg-blue-900 text-white text-xs font-semibold transition">
+                  Copy Báo Cáo Tổng Hợp
+                </button>
+                <button onclick="exportAdminCSV()"
+                  class="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold transition">
+                  Xuất Excel / CSV
+                </button>
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4">
+              <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div class="text-xs text-slate-500 font-medium">Quân số đã đăng ký</div>
+                <div class="text-2xl font-bold text-slate-800 mt-1">${total}</div>
+              </div>
+              <div class="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                <div class="text-xs text-emerald-700 font-medium">Hoàn thành đủ 4/4</div>
+                <div class="text-2xl font-bold text-emerald-700 mt-1">${completeCount}</div>
+              </div>
+              <div class="p-3.5 rounded-xl bg-amber-50 border border-amber-200">
+                <div class="text-xs text-amber-700 font-medium">Đang thực hiện (1-3/4)</div>
+                <div class="text-2xl font-bold text-amber-700 mt-1">${incompleteCount}</div>
+              </div>
+              <div class="p-3.5 rounded-xl bg-rose-50 border border-rose-200">
+                <div class="text-xs text-rose-700 font-medium">Chưa điểm danh</div>
+                <div class="text-2xl font-bold text-rose-700 mt-1">${noneCount}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap gap-1.5">
+              ${[
+                { id: "all", label: `Tất cả (${total})` },
+                { id: "complete", label: `Đủ 4/4 (${completeCount})` },
+                { id: "incomplete", label: `Làm thiếu (${incompleteCount})` },
+                { id: "none", label: `Chưa điểm danh (${noneCount})` }
+              ].map(f => `
+                <button onclick="setAdminFilter('${f.id}')"
+                  class="px-3 py-1.5 rounded-xl text-xs font-semibold transition ${state.adminFilter === f.id ? 'bg-blue-800 text-white' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">
+                  ${f.label}
+                </button>
+              `).join("")}
+            </div>
+            <input type="text" value="${state.adminSearch}" oninput="setAdminSearch(this.value)" placeholder="Tìm tên cán bộ..."
+              class="px-3.5 py-1.5 rounded-xl border border-slate-300 bg-white text-xs w-full sm:w-60 focus:outline-none focus:ring-2 focus:ring-blue-600" />
+          </div>
+
+          <div class="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div class="overflow-x-auto custom-scrollbar">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase">
+                    <th class="py-3 px-4">Cán bộ</th>
+                    <th class="py-3 px-3 text-center">QL Văn bản</th>
+                    <th class="py-3 px-3 text-center">PM Công việc</th>
+                    <th class="py-3 px-3 text-center">Luyện AI</th>
+                    <th class="py-3 px-3 text-center">Rà soát án</th>
+                    <th class="py-3 px-4">Ghi chú rà soát án</th>
+                    <th class="py-3 px-3 text-center">Tiến độ</th>
+                    <th class="py-3 px-4 text-right">Quản lý</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-100 text-xs">
+                  ${filtered.length === 0 ? `
+                    <tr>
+                      <td colspan="8" class="py-10 text-center text-slate-400">
+                        ${total === 0 ? 'Chưa có cán bộ nào đăng ký tài khoản trên hệ thống.' : 'Không tìm thấy cán bộ phù hợp bộ lọc.'}
+                      </td>
+                    </tr>
+                  ` : filtered.map(u => {
+                    const t = u.rec.tasks;
+                    const badge = (obj) => obj?.done
+                      ? `<span class="inline-flex flex-col items-center text-emerald-700 font-semibold"><span>✓</span><span class="text-[10px] text-slate-400">${obj.time || ''}</span></span>`
+                      : `<span class="text-slate-300">—</span>`;
+                    return `
+                      <tr class="hover:bg-slate-50/80">
+                        <td class="py-3 px-4">
+                          <div class="font-bold text-slate-800 flex items-center gap-1.5">
+                            <span>${u.fullName}</span>
+                            ${u.role === 'admin' ? '<span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 font-bold">Admin duy nhất</span>' : ''}
+                          </div>
+                          <div class="text-[11px] text-slate-400">${u.position || 'Cán bộ'} • @${u.username}</div>
+                        </td>
+                        <td class="py-3 px-3 text-center">${badge(t.qlvb)}</td>
+                        <td class="py-3 px-3 text-center">${badge(t.pmcv)}</td>
+                        <td class="py-3 px-3 text-center">${badge(t.luyenai)}</td>
+                        <td class="py-3 px-3 text-center">${badge(t.rasoatan)}</td>
+                        <td class="py-3 px-4 max-w-xs">
+                          <p class="text-slate-600 line-clamp-2">${t.rasoatan?.note || '<span class="text-slate-300 italic">Chưa nhập nội dung</span>'}</p>
+                        </td>
+                        <td class="py-3 px-3 text-center">
+                          <span class="px-2.5 py-1 rounded-full font-bold text-[11px] ${u.done === 4 ? 'bg-emerald-100 text-emerald-800' : u.done > 0 ? 'bg-amber-100 text-amber-800' : 'bg-rose-100 text-rose-700'}">
+                            ${u.done}/4
+                          </span>
+                        </td>
+                        <td class="py-3 px-4 text-right whitespace-nowrap">
+                          ${u.role !== 'admin' ? `
+                            <button onclick="removeUser('${u.username}')" class="px-2.5 py-1 rounded bg-rose-50 hover:bg-rose-100 text-[11px] font-medium text-rose-700">
+                              Xóa tài khoản
+                            </button>
+                          ` : '<span class="text-[11px] text-slate-400 italic">Tài khoản gốc</span>'}
+                        </td>
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function render() {
+      const root = document.getElementById("app");
+      const toastHtml = state.toast ? `
+        <div class="fixed bottom-5 right-5 z-50 px-4 py-3 rounded-xl shadow-lg text-xs font-semibold text-white transition ${state.toast.type === 'error' ? 'bg-rose-600' : 'bg-slate-900'}">
+          ${state.toast.msg}
+        </div>
+      ` : "";
+
+      if (!state.currentUser) {
+        root.innerHTML = renderAuth() + toastHtml;
+        return;
+      }
+
+      const u = state.currentUser;
+      root.innerHTML = `
+        <div class="min-h-screen flex flex-col">
+          <header class="bg-blue-950 text-white shadow-md sticky top-0 z-30">
+            <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-xl bg-amber-400 text-blue-950 font-extrabold flex items-center justify-center text-sm shadow">
+                  VKS
+                </div>
+                <div>
+                  <div class="font-bold text-sm tracking-tight">ĐIỂM DANH CÔNG VIỆC HÀNG NGÀY</div>
+                  <div class="text-[11px] text-blue-300 flex items-center gap-2">
+                    <span>VKSND Khu vực 5 - Hải Phòng</span>
+                    <span>•</span>
+                    <span class="inline-flex items-center gap-1 text-emerald-300">
+                      <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> Cloud Sync
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <div class="text-right hidden sm:block">
+                  <div class="text-xs font-bold">${u.fullName}</div>
+                  <div class="text-[11px] text-blue-300">${u.position || 'Cán bộ'} ${u.role === 'admin' ? '• Quản trị viên (Admin)' : ''}</div>
+                </div>
+                <button onclick="handleLogout()"
+                  class="px-3 py-1.5 rounded-xl bg-blue-900 hover:bg-blue-800 border border-blue-700 text-xs font-semibold transition">
+                  Đăng xuất
+                </button>
+              </div>
+            </div>
+
+            <div class="bg-blue-900/80 border-t border-blue-800/80">
+              <div class="max-w-6xl mx-auto px-4 flex gap-1 overflow-x-auto">
+                <button onclick="setTab('checkin')"
+                  class="px-4 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${state.activeTab === 'checkin' ? 'border-amber-400 text-amber-300' : 'border-transparent text-blue-200 hover:text-white'}">
+                  Điểm danh hôm nay (4 mục)
+                </button>
+                <button onclick="setTab('vault')"
+                  class="px-4 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${state.activeTab === 'vault' ? 'border-amber-400 text-amber-300' : 'border-transparent text-blue-200 hover:text-white'}">
+                  Sổ tay mật khẩu cá nhân
+                </button>
+                ${u.role === 'admin' ? `
+                  <button onclick="setTab('admin')"
+                    class="px-4 py-2.5 text-xs font-semibold border-b-2 transition whitespace-nowrap ${state.activeTab === 'admin' ? 'border-amber-400 text-amber-300' : 'border-transparent text-blue-200 hover:text-white'}">
+                    Quản trị Admin (Tổng hợp đơn vị)
+                  </button>
+                ` : ''}
+              </div>
+            </div>
+          </header>
+
+          <main class="flex-1 max-w-6xl w-full mx-auto px-4 py-6">
+            ${state.activeTab === 'checkin' ? renderCheckinTab() : ''}
+            ${state.activeTab === 'vault' ? renderVaultTab() : ''}
+            ${state.activeTab === 'admin' && u.role === 'admin' ? renderAdminTab() : ''}
+          </main>
+        </div>
+        ${toastHtml}
+      `;
+    }
+
+    render();
+  </script>
+</body>
+</html>
