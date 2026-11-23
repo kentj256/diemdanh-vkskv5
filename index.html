@@ -15,6 +15,9 @@
   <!-- Firebase SDK Compat -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+  <!-- QR Generator & Camera QR Scanner -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen">
   <div id="app"></div>
@@ -29,6 +32,33 @@
       appId: "1:878838898371:web:5c1e6147322c1473cd8c76",
       measurementId: "G-EBC1NTLP49"
     };
+
+    const QR_DAILY_SALT = "VKSKV5_HP_CHAM_GIO_DEN_DAILY_SALT_2026";
+
+    function computeDailyToken(dateStr) {
+      const input = `${QR_DAILY_SALT}|${dateStr}|VKSKV5`;
+      let h1 = 0x811c9dc5;
+      let h2 = 0x01000193;
+      for (let i = 0; i < input.length; i++) {
+        const ch = input.charCodeAt(i);
+        h1 ^= ch;
+        h1 = Math.imul(h1, 0x01000193);
+        h2 = Math.imul(h2 ^ ch, 0x85ebca6b);
+      }
+      const part1 = (h1 >>> 0).toString(16).toUpperCase().padStart(8, "0");
+      const part2 = (h2 >>> 0).toString(16).toUpperCase().padStart(8, "0");
+      return `VKSKV5-${dateStr.replace(/-/g, "")}-${part1}${part2}`;
+    }
+
+    function buildDailyQrPayload(dateStr) {
+      return JSON.stringify({
+        app: "VKSKV5_DIEMDANH",
+        action: "ARRIVAL_CHECKIN",
+        unit: "VKSND Khu vực 5 - Hải Phòng",
+        date: dateStr,
+        token: computeDailyToken(dateStr)
+      });
+    }
 
     let db = null;
     let firebaseConnected = false;
@@ -78,20 +108,29 @@
 
     const todayStr = () => {
       const d = new Date();
-      return d.toISOString().split("T")[0];
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
     };
+
+    let html5QrScanner = null;
+    let isScannerRunning = false;
 
     let state = {
       currentUser: JSON.parse(localStorage.getItem("vks_current_user") || "null"),
       authMode: "login",
       activeTab: "checkin",
       selectedDate: todayStr(),
+      qrTargetDate: todayStr(),
       adminFilter: "all",
       adminSearch: "",
       users: JSON.parse(localStorage.getItem("vks_users") || "[]"),
       checkins: JSON.parse(localStorage.getItem("vks_checkins") || "{}"),
       vault: {},
       showPasswords: {},
+      qrModalOpen: false,
+      qrStatusMsg: "",
       toast: null
     };
 
@@ -206,16 +245,18 @@
 
     function getRecord(username, date) {
       const key = `${username}_${date}`;
-      return state.checkins[key] || {
+      const existing = state.checkins[key] || {};
+      return {
         username,
         date,
+        arrival: existing.arrival || { checked: false, time: "", method: "" },
         tasks: {
-          qlvb: { done: false, time: "" },
-          pmcv: { done: false, time: "" },
-          luyenai: { done: false, time: "" },
-          rasoatan: { done: false, time: "", note: "" }
+          qlvb: { done: false, time: "", ...(existing.tasks?.qlvb || {}) },
+          pmcv: { done: false, time: "", ...(existing.tasks?.pmcv || {}) },
+          luyenai: { done: false, time: "", ...(existing.tasks?.luyenai || {}) },
+          rasoatan: { done: false, time: "", note: "", ...(existing.tasks?.rasoatan || {}) }
         },
-        updatedAt: ""
+        updatedAt: existing.updatedAt || ""
       };
     }
 
@@ -251,6 +292,435 @@
     function hasExistingAdmin() {
       return state.users.some(u => u.role === "admin");
     }
+
+    function validateDailyQrContent(decodedText, expectedDate) {
+      const raw = (decodedText || "").trim();
+      const expectedToken = computeDailyToken(expectedDate);
+      if (raw === expectedToken) {
+        return { valid: true, reason: "" };
+      }
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.action === "ARRIVAL_CHECKIN") {
+          if (parsed.date && parsed.date !== expectedDate) {
+            return {
+              valid: false,
+              reason: `Mã QR này thuộc ngày ${parsed.date.split("-").reverse().join("/")}, không dùng cho ngày ${expectedDate.split("-").reverse().join("/")}.`
+            };
+          }
+          if (parsed.token === expectedToken) {
+            return { valid: true, reason: "" };
+          }
+        }
+      } catch (e) {}
+      return {
+        valid: false,
+        reason: `Mã QR không hợp lệ cho ngày ${expectedDate.split("-").reverse().join("/")}. Hãy quét mã QR báo giờ đến của đúng ngày hôm nay.`
+      };
+    }
+
+    async function recordArrivalTime(methodLabel = "Quét mã QR theo ngày", targetDate = null) {
+      if (!state.currentUser) return;
+      const dateToUse = targetDate || state.selectedDate;
+      const key = `${state.currentUser.username}_${dateToUse}`;
+      const rec = JSON.parse(JSON.stringify(getRecord(state.currentUser.username, dateToUse)));
+      const timeNow = nowTimeStr();
+      rec.arrival = {
+        checked: true,
+        time: timeNow,
+        method: methodLabel
+      };
+      rec.fullName = state.currentUser.fullName;
+      rec.position = state.currentUser.position;
+      rec.updatedAt = timeNow;
+      await syncCheckinToCloud(key, rec);
+      showToast(`Đã chấm báo giờ đến ngày ${dateToUse.split("-").reverse().join("/")} lúc ${timeNow} (${methodLabel})!`);
+      render();
+    }
+
+    window.openQrScannerModal = async () => {
+      state.qrModalOpen = true;
+      state.qrStatusMsg = "Đang khởi động camera...";
+      render();
+      setTimeout(() => startCameraQr(), 120);
+    };
+
+    window.closeQrScannerModal = async () => {
+      await stopCameraQr();
+      state.qrModalOpen = false;
+      state.qrStatusMsg = "";
+      render();
+    };
+
+    async function startCameraQr() {
+      const readerEl = document.getElementById("qr-reader");
+      if (!readerEl || !window.Html5Qrcode) {
+        state.qrStatusMsg = "Không tải được thư viện quét QR. Anh có thể chọn ảnh mã QR ngày hôm nay bên dưới.";
+        render();
+        return;
+      }
+      try {
+        await stopCameraQr();
+        html5QrScanner = new Html5Qrcode("qr-reader");
+        await html5QrScanner.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 220, height: 220 } },
+          async (decodedText) => {
+            const check = validateDailyQrContent(decodedText, state.selectedDate);
+            if (check.valid) {
+              await stopCameraQr();
+              state.qrModalOpen = false;
+              state.qrStatusMsg = "";
+              await recordArrivalTime(`Quét QR ngày ${state.selectedDate.split("-").reverse().join("/")}`, state.selectedDate);
+            } else {
+              state.qrStatusMsg = check.reason;
+              render();
+            }
+          },
+          () => {}
+        );
+        isScannerRunning = true;
+        state.qrStatusMsg = `Hướng camera vào mã QR ngày ${state.selectedDate.split("-").reverse().join("/")}...`;
+        render();
+      } catch (err) {
+        console.warn("Camera QR start error:", err);
+        state.qrStatusMsg = "Trình duyệt chưa mở được camera (hãy cấp quyền Camera hoặc chọn ảnh mã QR ngày hôm nay bên dưới).";
+        render();
+      }
+    }
+
+    async function stopCameraQr() {
+      if (html5QrScanner && isScannerRunning) {
+        try {
+          await html5QrScanner.stop();
+          await html5QrScanner.clear();
+        } catch (e) {}
+      }
+      isScannerRunning = false;
+      html5QrScanner = null;
+    }
+
+    window.handleQrImageUpload = async (event) => {
+      const file = event.target.files?.[0];
+      if (!file || !window.Html5Qrcode) return;
+      try {
+        const tempScanner = new Html5Qrcode("qr-file-temp");
+        const decodedText = await tempScanner.scanFile(file, true);
+        await tempScanner.clear();
+        const check = validateDailyQrContent(decodedText, state.selectedDate);
+        if (check.valid) {
+          await stopCameraQr();
+          state.qrModalOpen = false;
+          state.qrStatusMsg = "";
+          await recordArrivalTime(`Ảnh QR ngày ${state.selectedDate.split("-").reverse().join("/")}`, state.selectedDate);
+        } else {
+          state.qrStatusMsg = check.reason;
+          render();
+        }
+      } catch (err) {
+        state.qrStatusMsg = "Không nhận diện được mã QR trong ảnh. Hãy thử chụp rõ nét hơn.";
+        render();
+      }
+    };
+
+    window.changeQrTargetDate = (val) => {
+      if (!val) return;
+      state.qrTargetDate = val;
+      render();
+      renderUnitQrCodeBox();
+    };
+
+    window.setQrTargetToday = () => {
+      state.qrTargetDate = todayStr();
+      render();
+      renderUnitQrCodeBox();
+    };
+
+    // Bộ tạo mã QR chuẩn (Version 6, Error Correction L) chạy trực tiếp nội bộ, không phụ thuộc CDN ngoài
+    const QR_GF_EXP = new Uint8Array(512);
+    const QR_GF_LOG = new Uint8Array(256);
+    (() => {
+      let x = 1;
+      for (let i = 0; i < 255; i++) {
+        QR_GF_EXP[i] = x;
+        QR_GF_LOG[x] = i;
+        x <<= 1;
+        if (x & 0x100) x ^= 0x11d;
+      }
+      for (let i = 255; i < 512; i++) {
+        QR_GF_EXP[i] = QR_GF_EXP[i - 255];
+      }
+    })();
+
+    function qrGfMul(a, b) {
+      if (a === 0 || b === 0) return 0;
+      return QR_GF_EXP[(QR_GF_LOG[a] + QR_GF_LOG[b]) % 255];
+    }
+
+    function qrPolyMul(p, q) {
+      const res = new Uint8Array(p.length + q.length - 1);
+      for (let i = 0; i < p.length; i++) {
+        for (let j = 0; j < q.length; j++) {
+          res[i + j] ^= qrGfMul(p[i], q[j]);
+        }
+      }
+      return res;
+    }
+
+    function qrRsDivisor(deg) {
+      let d = new Uint8Array([1]);
+      for (let i = 0; i < deg; i++) {
+        d = qrPolyMul(d, new Uint8Array([1, QR_GF_EXP[i]]));
+      }
+      return d;
+    }
+
+    function qrCalcEc(data, ecLen) {
+      const gen = qrRsDivisor(ecLen);
+      const buf = new Uint8Array(data.length + ecLen);
+      buf.set(data);
+      for (let i = 0; i < data.length; i++) {
+        const factor = buf[i];
+        if (factor !== 0) {
+          for (let j = 0; j < gen.length; j++) {
+            buf[i + j] ^= qrGfMul(gen[j], factor);
+          }
+        }
+      }
+      return buf.slice(data.length);
+    }
+
+    // Version 6-L: 41x41 modules, 136 data codewords (1088 bits = 136 bytes), 2 blocks of 68 data + 18 ec = 36 ec codewords
+    function generateQrMatrixV6L(text) {
+      const size = 41;
+      const bytes = new TextEncoder().encode(text);
+      const maxDataBytes = 136;
+      const bits = [];
+      const pushBits = (val, len) => {
+        for (let i = len - 1; i >= 0; i--) {
+          bits.push((val >> i) & 1);
+        }
+      };
+
+      // Byte mode indicator = 0100, char count = 8 bits for V6 byte mode
+      pushBits(0b0100, 4);
+      pushBits(bytes.length, 8);
+      for (let i = 0; i < bytes.length; i++) {
+        pushBits(bytes[i], 8);
+      }
+      // Terminator up to 4 bits
+      const capacityBits = maxDataBytes * 8;
+      const termLen = Math.min(4, capacityBits - bits.length);
+      if (termLen > 0) pushBits(0, termLen);
+      while (bits.length % 8 !== 0) bits.push(0);
+
+      const dataBytes = new Uint8Array(maxDataBytes);
+      let bIdx = 0;
+      for (let i = 0; i < bits.length; i += 8) {
+        let byteVal = 0;
+        for (let k = 0; k < 8; k++) byteVal = (byteVal << 1) | (bits[i + k] || 0);
+        dataBytes[bIdx++] = byteVal;
+      }
+      const padBytes = [0xec, 0x11];
+      let pIdx = 0;
+      while (bIdx < maxDataBytes) {
+        dataBytes[bIdx++] = padBytes[pIdx % 2];
+        pIdx++;
+      }
+
+      // 2 blocks of 68 data codewords, each with 18 EC codewords
+      const b1Data = dataBytes.slice(0, 68);
+      const b2Data = dataBytes.slice(68, 136);
+      const b1Ec = qrCalcEc(b1Data, 18);
+      const b2Ec = qrCalcEc(b2Data, 18);
+
+      const finalCodewords = [];
+      for (let i = 0; i < 68; i++) {
+        finalCodewords.push(b1Data[i]);
+        finalCodewords.push(b2Data[i]);
+      }
+      for (let i = 0; i < 18; i++) {
+        finalCodewords.push(b1Ec[i]);
+        finalCodewords.push(b2Ec[i]);
+      }
+
+      const matrix = Array.from({ length: size }, () => Array(size).fill(null));
+      const reserved = Array.from({ length: size }, () => Array(size).fill(false));
+
+      const placeFinder = (r0, c0) => {
+        for (let r = -1; r <= 7; r++) {
+          for (let c = -1; c <= 7; c++) {
+            const rr = r0 + r;
+            const cc = c0 + c;
+            if (rr < 0 || rr >= size || cc < 0 || cc >= size) continue;
+            const inBox = r >= 0 && r <= 6 && c >= 0 && c <= 6;
+            const border = r === 0 || r === 6 || c === 0 || c === 6;
+            const center = r >= 2 && r <= 4 && c >= 2 && c <= 4;
+            matrix[rr][cc] = inBox && (border || center) ? 1 : 0;
+            reserved[rr][cc] = true;
+          }
+        }
+      };
+
+      placeFinder(0, 0);
+      placeFinder(0, size - 7);
+      placeFinder(size - 7, 0);
+
+      // Alignment pattern for V6 centered at (34, 34)
+      const alignCenter = 34;
+      for (let r = -2; r <= 2; r++) {
+        for (let c = -2; c <= 2; c++) {
+          const rr = alignCenter + r;
+          const cc = alignCenter + c;
+          const val = Math.abs(r) === 2 || Math.abs(c) === 2 || (r === 0 && c === 0) ? 1 : 0;
+          matrix[rr][cc] = val;
+          reserved[rr][cc] = true;
+        }
+      }
+
+      // Timing patterns
+      for (let i = 8; i < size - 8; i++) {
+        const val = i % 2 === 0 ? 1 : 0;
+        if (!reserved[6][i]) {
+          matrix[6][i] = val;
+          reserved[6][i] = true;
+        }
+        if (!reserved[i][6]) {
+          matrix[i][6] = val;
+          reserved[i][6] = true;
+        }
+      }
+
+      // Dark module at (4*6 + 9, 8) = (33, 8)
+      matrix[33][8] = 1;
+      reserved[33][8] = true;
+
+      // Reserve format info cells around finders
+      for (let i = 0; i < 9; i++) {
+        if (i < size) {
+          reserved[8][i] = true;
+          reserved[i][8] = true;
+        }
+      }
+      for (let i = 0; i < 8; i++) {
+        reserved[8][size - 1 - i] = true;
+        reserved[size - 1 - i][8] = true;
+      }
+
+      // Data bit stream placement (mask 0: (r + c) % 2 === 0)
+      const streamBits = [];
+      for (const cw of finalCodewords) {
+        for (let b = 7; b >= 0; b--) {
+          streamBits.push((cw >> b) & 1);
+        }
+      }
+
+      let bitPtr = 0;
+      let dir = -1;
+      for (let col = size - 1; col >= 1; col -= 2) {
+        if (col === 6) col = 5;
+        for (let row = dir === -1 ? size - 1 : 0; row >= 0 && row < size; row += dir) {
+          for (let dCol = 0; dCol < 2; dCol++) {
+            const c = col - dCol;
+            if (reserved[row][c]) continue;
+            const rawBit = bitPtr < streamBits.length ? streamBits[bitPtr++] : 0;
+            const maskedBit = (row + c) % 2 === 0 ? (rawBit ^ 1) : rawBit;
+            matrix[row][c] = maskedBit;
+          }
+        }
+        dir = -dir;
+      }
+
+      // Format string for ECL L (01) and Mask 0 (000) -> 01000, BCH(15,5) -> 010001011110111 -> XOR 101010000010010 = 111011111000100
+      const fmtBits = [1,1,1,0,1,1,1,1,1,0,0,0,1,0,0];
+      const topLeftCoords = [
+        [0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],
+        [8,7],[8,5],[8,4],[8,3],[8,2],[8,1],[8,0]
+      ];
+      for (let i = 0; i < 15; i++) {
+        const [r, c] = topLeftCoords[i];
+        matrix[r][c] = fmtBits[i];
+      }
+      for (let i = 0; i < 8; i++) {
+        matrix[8][size - 1 - i] = fmtBits[i];
+      }
+      for (let i = 8; i < 15; i++) {
+        matrix[size - 15 + i][8] = fmtBits[i];
+      }
+
+      return matrix;
+    }
+
+    function renderUnitQrCodeBox() {
+      const applyToDom = () => {
+        const container = document.getElementById("unit-arrival-qrcode");
+        if (!container) return;
+        const payload = buildDailyQrPayload(state.qrTargetDate);
+        const matrix = generateQrMatrixV6L(payload);
+        const n = matrix.length;
+        const quiet = 4;
+        const scale = 6;
+        const totalPx = (n + quiet * 2) * scale;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = totalPx;
+        canvas.height = totalPx;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, totalPx, totalPx);
+        ctx.fillStyle = "#0f172a";
+
+        for (let r = 0; r < n; r++) {
+          for (let c = 0; c < n; c++) {
+            if (matrix[r][c] === 1) {
+              ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+            }
+          }
+        }
+
+        container.innerHTML = "";
+        const img = document.createElement("img");
+        img.src = canvas.toDataURL("image/png");
+        img.alt = `Mã QR ngày ${state.qrTargetDate}`;
+        img.className = "w-44 h-44 block";
+        container.appendChild(img);
+      };
+
+      requestAnimationFrame(() => setTimeout(applyToDom, 30));
+    }
+
+    window.downloadQrCanvas = () => {
+      const container = document.getElementById("unit-arrival-qrcode");
+      const img = container?.querySelector("img");
+      const canvas = container?.querySelector("canvas");
+      const dataUrl = img?.src || canvas?.toDataURL("image/png");
+      if (!dataUrl) {
+        renderUnitQrCodeBox();
+        showToast("Đang khởi tạo lại ảnh mã QR, hãy bấm tải lại sau 1 giây", "error");
+        return;
+      }
+      const compactDate = state.qrTargetDate.replace(/-/g, "");
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = `Ma_QR_Bao_Gio_Den_VKSKV5_${compactDate}.png`;
+      a.click();
+      showToast(`Đã tải ảnh mã QR ngày ${state.qrTargetDate.split("-").reverse().join("/")}!`);
+    };
+
+    window.copyGuardHandoverMessage = () => {
+      const dateFormatted = state.qrTargetDate.split("-").reverse().join("/");
+      const tokenShort = computeDailyToken(state.qrTargetDate);
+      const NL = String.fromCharCode(10);
+      const msg = [
+        `MÃ QR CHẤM BÁO GIỜ ĐẾN - NGÀY ${dateFormatted}`,
+        "Đơn vị: VKSND Khu vực 5 - Hải Phòng",
+        "- Lưu ý: Mã QR này chỉ có hiệu lực cho ngày " + dateFormatted + ", sang ngày mới sẽ đổi mã khác.",
+        "- Cán bộ mở web điểm danh -> bấm 'Quét mã QR báo giờ đến' -> quét mã QR của ngày " + dateFormatted + ".",
+        "- Mã xác thực ngày: " + tokenShort
+      ].join(NL);
+      navigator.clipboard.writeText(msg);
+      showToast(`Đã sao chép lời nhắn bàn giao mã QR ngày ${dateFormatted} cho đồng chí bảo vệ!`);
+    };
 
     window.switchAuthMode = (mode) => {
       state.authMode = mode;
@@ -372,19 +842,26 @@
       render();
     };
 
-    window.handleLogout = () => {
+    window.handleLogout = async () => {
+      await stopCameraQr();
+      state.qrModalOpen = false;
       state.currentUser = null;
       saveLocal();
       render();
     };
 
-    window.setTab = (tab) => {
+    window.setTab = async (tab) => {
       if (tab === "admin" && state.currentUser?.role !== "admin") {
         showToast("Bạn không có quyền truy cập khu vực Quản trị!", "error");
         return;
       }
+      await stopCameraQr();
+      state.qrModalOpen = false;
       state.activeTab = tab;
       render();
+      if (tab === "admin") {
+        renderUnitQrCodeBox();
+      }
     };
 
     window.changeDate = (val) => {
@@ -464,6 +941,7 @@
         "BÁO CÁO ĐIỂM DANH CÔNG VIỆC HÀNG NGÀY",
         `- Cán bộ: ${u.fullName} (${u.position})`,
         `- Ngày: ${state.selectedDate.split("-").reverse().join("/")}`,
+        `- Giờ đến cơ quan (QR ngày): ${rec.arrival?.checked ? `${rec.arrival.time} (${rec.arrival.method || "QR"})` : "Chưa quét QR"}`,
         `- Tiến độ hoàn thành: ${doneCount}/4 hạng mục`,
         `1. Quản lý văn bản: ${rec.tasks.qlvb?.done ? `Đã xong (${rec.tasks.qlvb.time})` : "Chưa thực hiện"}`,
         `2. Quản lý công việc: ${rec.tasks.pmcv?.done ? `Đã xong (${rec.tasks.pmcv.time})` : "Chưa thực hiện"}`,
@@ -479,7 +957,7 @@
     window.exportPersonalCSV = () => {
       const u = state.currentUser;
       const monthPrefix = state.selectedDate.slice(0, 7);
-      const rows = [["Ngày", "Cán bộ", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tổng đạt"]];
+      const rows = [["Ngày", "Cán bộ", "Giờ đến (QR)", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tổng đạt"]];
       Object.values(state.checkins)
         .filter(r => r.username === u.username && r.date.startsWith(monthPrefix))
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -487,6 +965,7 @@
           rows.push([
             r.date,
             u.fullName,
+            r.arrival?.checked ? r.arrival.time : "",
             r.tasks.qlvb?.done ? `X (${r.tasks.qlvb.time})` : "",
             r.tasks.pmcv?.done ? `X (${r.tasks.pmcv.time})` : "",
             r.tasks.luyenai?.done ? `X (${r.tasks.luyenai.time})` : "",
@@ -500,13 +979,14 @@
 
     window.exportAdminCSV = () => {
       if (state.currentUser?.role !== "admin") return;
-      const rows = [["Ngày", "Họ và tên", "Chức vụ", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tiến độ"]];
+      const rows = [["Ngày", "Họ và tên", "Chức vụ", "Giờ đến (QR)", "Quản lý VB", "PM Công việc", "Luyện AI", "Rà soát án", "Ghi chú rà soát", "Tiến độ"]];
       state.users.forEach(u => {
         const r = getRecord(u.username, state.selectedDate);
         rows.push([
           state.selectedDate,
           u.fullName,
           u.position,
+          r.arrival?.checked ? r.arrival.time : "Chưa",
           r.tasks.qlvb?.done ? `X (${r.tasks.qlvb.time})` : "Chưa",
           r.tasks.pmcv?.done ? `X (${r.tasks.pmcv.time})` : "Chưa",
           r.tasks.luyenai?.done ? `X (${r.tasks.luyenai.time})` : "Chưa",
@@ -521,13 +1001,19 @@
     window.copyAdminSummary = () => {
       if (state.currentUser?.role !== "admin") return;
       const total = state.users.length;
+      let arrivedCount = 0;
       let full = 0, partial = 0, none = 0;
+      const arrivalList = [];
       const incompleteNames = [];
       const overdueNotes = [];
       const NL = String.fromCharCode(10);
 
       state.users.forEach(u => {
         const r = getRecord(u.username, state.selectedDate);
+        if (r.arrival?.checked) {
+          arrivedCount++;
+          arrivalList.push(`- ${u.fullName}: ${r.arrival.time}`);
+        }
         const c = countDone(r);
         if (c === 4) full++;
         else if (c > 0) {
@@ -546,9 +1032,11 @@
         "TỔNG HỢP ĐIỂM DANH CÔNG VIỆC - VKSND KHU VỰC 5 HẢI PHÒNG",
         `Ngày: ${state.selectedDate.split("-").reverse().join("/")}`,
         `- Tổng quân số trên hệ thống: ${total} đ/c`,
+        `- Đã quét QR báo giờ đến: ${arrivedCount}/${total} đ/c`,
         `- Hoàn thành đủ 4/4 mục: ${full} đ/c`,
         `- Đang thực hiện (1-3/4): ${partial} đ/c`,
         `- Chưa điểm danh: ${none} đ/c`,
+        arrivalList.length ? `${NL}Giờ đến cơ quan:${NL}${arrivalList.join(NL)}` : "",
         incompleteNames.length ? `${NL}Danh sách chưa hoàn thành đủ:${NL}• ${incompleteNames.join(`${NL}• `)}` : `${NL}100% cán bộ đã hoàn thành đủ các hạng mục!`,
         overdueNotes.length ? `${NL}Ghi nhận rà soát án:${NL}${overdueNotes.join(NL)}` : ""
       ].filter(Boolean).join(NL);
@@ -610,6 +1098,44 @@
       return cells;
     }
 
+    function renderQrModal() {
+      if (!state.qrModalOpen) return "";
+      const dateFormatted = state.selectedDate.split("-").reverse().join("/");
+      return `
+        <div class="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div class="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden">
+            <div class="bg-blue-950 text-white px-5 py-4 flex items-center justify-between">
+              <div>
+                <h3 class="text-sm font-bold uppercase tracking-tight">Quét Mã QR Báo Giờ Đến (${dateFormatted})</h3>
+                <p class="text-[11px] text-blue-300">Chỉ chấp nhận mã QR hợp lệ của ngày ${dateFormatted}</p>
+              </div>
+              <button onclick="closeQrScannerModal()" class="w-8 h-8 rounded-lg bg-blue-900 hover:bg-blue-800 text-sm font-bold">✕</button>
+            </div>
+
+            <div class="p-5 space-y-4">
+              <div id="qr-reader" class="w-full rounded-xl overflow-hidden bg-slate-100 border border-slate-200 min-h-[240px]"></div>
+              <div id="qr-file-temp" class="hidden"></div>
+
+              <div class="p-3 rounded-xl bg-blue-50 border border-blue-200 text-xs text-blue-900">
+                ${state.qrStatusMsg || `Đang chờ quét mã QR ngày ${dateFormatted}...`}
+              </div>
+
+              <div class="pt-1 border-t border-slate-100">
+                <label class="block text-xs font-semibold text-slate-700 mb-2">Hoặc chọn ảnh chụp mã QR của ngày ${dateFormatted}:</label>
+                <input type="file" accept="image/*" onchange="handleQrImageUpload(event)"
+                  class="block w-full text-xs text-slate-600 file:mr-3 file:py-2 file:px-3.5 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-800 hover:file:bg-slate-200 cursor-pointer" />
+              </div>
+
+              <button onclick="closeQrScannerModal()"
+                class="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
+                Đóng khung quét QR
+              </button>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
     function renderAuth() {
       const savedCred = JSON.parse(localStorage.getItem("vks_saved_cred") || "null");
       const adminAlreadyExists = state.users.length > 0 || hasExistingAdmin();
@@ -622,7 +1148,7 @@
                 VKS
               </div>
               <h1 class="text-lg font-bold tracking-tight uppercase">VKSND Khu Vực 5 - Hải Phòng</h1>
-              <p class="text-blue-200 text-xs mt-1">Hệ thống Điểm danh Công việc & Rà soát án hàng ngày</p>
+              <p class="text-blue-200 text-xs mt-1">Hệ thống Điểm danh Công việc, Quét QR Giờ đến & Rà soát án</p>
               <div class="mt-3 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] bg-blue-950/70 border border-blue-700/50">
                 <span class="w-2 h-2 rounded-full ${firebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}"></span>
                 <span>${firebaseConnected ? 'Đã kết nối máy chủ Cloud đồng bộ' : 'Chế độ lưu trữ cục bộ'}</span>
@@ -718,10 +1244,43 @@
       const doneCount = countDone(rec);
       const pct = Math.round((doneCount / 4) * 100);
       const streak = getStreak(u.username);
+      const arrival = rec.arrival || { checked: false, time: "", method: "" };
+      const dateFormatted = state.selectedDate.split("-").reverse().join("/");
 
       return `
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div class="lg:col-span-2 space-y-4">
+            <!-- Thẻ Quét mã QR chấm báo giờ đến theo ngày -->
+            <div class="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border ${arrival.checked ? 'border-emerald-300 bg-emerald-50/30' : 'border-blue-200 bg-blue-50/30'}">
+              <div class="flex flex-wrap items-center justify-between gap-4">
+                <div class="flex items-start gap-3.5">
+                  <div class="w-11 h-11 rounded-xl ${arrival.checked ? 'bg-emerald-600 text-white' : 'bg-blue-800 text-amber-300'} flex items-center justify-center font-bold text-base shrink-0 shadow-xs">
+                    QR
+                  </div>
+                  <div>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h2 class="text-sm sm:text-base font-bold text-slate-800">Chấm Báo Giờ Đến Cơ Quan (QR Ngày ${dateFormatted})</h2>
+                      ${arrival.checked
+                        ? `<span class="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800">Đã đến lúc ${arrival.time}</span>`
+                        : `<span class="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800">Chưa chấm giờ đến</span>`
+                      }
+                    </div>
+                    <p class="text-xs text-slate-600 mt-0.5">
+                      ${arrival.checked
+                        ? `Ghi nhận giờ đến ngày ${dateFormatted} lúc <strong>${arrival.time}</strong> (${arrival.method || "Quét QR"}). Quét lại nếu cần cập nhật giờ mới.`
+                        : `Quét mã QR báo giờ đến dành riêng cho ngày <strong>${dateFormatted}</strong> để ghi nhận giờ đến cơ quan.`
+                      }
+                    </p>
+                  </div>
+                </div>
+
+                <button onclick="openQrScannerModal()"
+                  class="px-4 py-2.5 rounded-xl bg-blue-800 hover:bg-blue-900 text-white text-xs font-semibold shadow-xs transition flex items-center gap-2 shrink-0">
+                  <span>${arrival.checked ? 'Quét lại mã QR' : 'Quét mã QR báo giờ đến'}</span>
+                </button>
+              </div>
+            </div>
+
             <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
               <div class="flex flex-wrap items-center justify-between gap-4 mb-4">
                 <div>
@@ -901,7 +1460,12 @@
     }
 
     function renderAdminTab() {
+      renderUnitQrCodeBox();
+
+      const qrDateFormatted = state.qrTargetDate.split("-").reverse().join("/");
+      const dailyToken = computeDailyToken(state.qrTargetDate);
       const total = state.users.length;
+      let arrivedCount = 0;
       let completeCount = 0;
       let incompleteCount = 0;
       let noneCount = 0;
@@ -909,6 +1473,7 @@
       const enriched = state.users.map(u => {
         const rec = getRecord(u.username, state.selectedDate);
         const done = countDone(rec);
+        if (rec.arrival?.checked) arrivedCount++;
         if (done === 4) completeCount++;
         else if (done > 0) incompleteCount++;
         else noneCount++;
@@ -928,11 +1493,55 @@
 
       return `
         <div class="space-y-5">
+          <!-- Khối Mã QR Báo Giờ Đến Thay Đổi Theo Từng Ngày -->
+          <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-5 items-center">
+              <div class="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-50 border border-slate-200">
+                <div id="unit-arrival-qrcode" class="bg-white p-2.5 rounded-xl border border-slate-200 shadow-2xs"></div>
+                <span class="text-[11px] font-bold text-blue-900 mt-2">QR Ngày ${qrDateFormatted}</span>
+                <span class="text-[10px] font-mono text-slate-400 mt-0.5 break-all text-center">${dailyToken}</span>
+              </div>
+              <div class="md:col-span-2 space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span class="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-800 mb-1">Mã QR Đổi Theo Ngày • Giao Bảo Vệ</span>
+                    <h3 class="text-base font-bold text-slate-800">Mã QR Chấm Báo Giờ Đến Ngày ${qrDateFormatted}</h3>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <input type="date" value="${state.qrTargetDate}" onchange="changeQrTargetDate(this.value)"
+                      class="px-3 py-1.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700" />
+                    <button onclick="setQrTargetToday()"
+                      class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-xs font-semibold text-slate-700">
+                      Hôm nay
+                    </button>
+                  </div>
+                </div>
+                <p class="text-xs text-slate-500 leading-relaxed">
+                  Mỗi ngày hệ thống tự sinh một mã QR riêng gắn với ngày đó. Đồng chí có thể tải ảnh QR của ngày <strong>${qrDateFormatted}</strong> (hoặc chọn trước ngày kế tiếp) để chuyển cho đồng chí làm nhiệm vụ bảo vệ đưa/cho cán bộ quét khi đến cơ quan. Mã QR của ngày khác sẽ không dùng chéo sang ngày này.
+                </p>
+                <div class="flex flex-wrap items-center gap-2.5">
+                  <button onclick="downloadQrCanvas()"
+                    class="px-4 py-2 rounded-xl bg-blue-800 hover:bg-blue-900 text-white text-xs font-semibold transition">
+                    Tải ảnh QR ngày ${qrDateFormatted} (.PNG)
+                  </button>
+                  <button onclick="copyGuardHandoverMessage()"
+                    class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold transition">
+                    Copy nội dung bàn giao bảo vệ
+                  </button>
+                  <button onclick="window.print()"
+                    class="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
+                    In mã QR ngày
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
             <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-100">
               <div>
                 <h2 class="text-base font-bold text-slate-800">Bảng Điều Hành Quản Trị Đơn Vị</h2>
-                <p class="text-xs text-slate-500">Giám sát tiến độ điểm danh 4 hạng mục và kết quả rà soát án toàn đơn vị theo thời gian thực</p>
+                <p class="text-xs text-slate-500">Giám sát giờ đến (QR ngày ${state.selectedDate.split("-").reverse().join("/")}), tiến độ điểm danh 4 hạng mục và kết quả rà soát án</p>
               </div>
               <div class="flex flex-wrap items-center gap-2">
                 <input type="date" value="${state.selectedDate}" onchange="changeDate(this.value)"
@@ -948,17 +1557,21 @@
               </div>
             </div>
 
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4">
+            <div class="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-4">
               <div class="p-3.5 rounded-xl bg-slate-50 border border-slate-200">
-                <div class="text-xs text-slate-500 font-medium">Quân số đã đăng ký</div>
+                <div class="text-xs text-slate-500 font-medium">Quân số đăng ký</div>
                 <div class="text-2xl font-bold text-slate-800 mt-1">${total}</div>
+              </div>
+              <div class="p-3.5 rounded-xl bg-blue-50 border border-blue-200">
+                <div class="text-xs text-blue-700 font-medium">Đã quét QR đến</div>
+                <div class="text-2xl font-bold text-blue-800 mt-1">${arrivedCount}</div>
               </div>
               <div class="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200">
                 <div class="text-xs text-emerald-700 font-medium">Hoàn thành đủ 4/4</div>
                 <div class="text-2xl font-bold text-emerald-700 mt-1">${completeCount}</div>
               </div>
               <div class="p-3.5 rounded-xl bg-amber-50 border border-amber-200">
-                <div class="text-xs text-amber-700 font-medium">Đang thực hiện (1-3/4)</div>
+                <div class="text-xs text-amber-700 font-medium">Đang làm (1-3/4)</div>
                 <div class="text-2xl font-bold text-amber-700 mt-1">${incompleteCount}</div>
               </div>
               <div class="p-3.5 rounded-xl bg-rose-50 border border-rose-200">
@@ -992,6 +1605,7 @@
                 <thead>
                   <tr class="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600 uppercase">
                     <th class="py-3 px-4">Cán bộ</th>
+                    <th class="py-3 px-3 text-center">Giờ đến (QR)</th>
                     <th class="py-3 px-3 text-center">QL Văn bản</th>
                     <th class="py-3 px-3 text-center">PM Công việc</th>
                     <th class="py-3 px-3 text-center">Luyện AI</th>
@@ -1004,12 +1618,13 @@
                 <tbody class="divide-y divide-slate-100 text-xs">
                   ${filtered.length === 0 ? `
                     <tr>
-                      <td colspan="8" class="py-10 text-center text-slate-400">
+                      <td colspan="9" class="py-10 text-center text-slate-400">
                         ${total === 0 ? 'Chưa có cán bộ nào đăng ký tài khoản trên hệ thống.' : 'Không tìm thấy cán bộ phù hợp bộ lọc.'}
                       </td>
                     </tr>
                   ` : filtered.map(u => {
                     const t = u.rec.tasks;
+                    const arr = u.rec.arrival;
                     const badge = (obj) => obj?.done
                       ? `<span class="inline-flex flex-col items-center text-emerald-700 font-semibold"><span>✓</span><span class="text-[10px] text-slate-400">${obj.time || ''}</span></span>`
                       : `<span class="text-slate-300">—</span>`;
@@ -1021,6 +1636,12 @@
                             ${u.role === 'admin' ? '<span class="px-1.5 py-0.5 text-[10px] rounded bg-amber-100 text-amber-800 font-bold">Admin duy nhất</span>' : ''}
                           </div>
                           <div class="text-[11px] text-slate-400">${u.position || 'Cán bộ'} • @${u.username}</div>
+                        </td>
+                        <td class="py-3 px-3 text-center">
+                          ${arr?.checked
+                            ? `<span class="inline-flex flex-col items-center px-2 py-0.5 rounded-lg bg-blue-50 text-blue-800 font-bold"><span>${arr.time}</span><span class="text-[10px] font-normal text-blue-600">QR</span></span>`
+                            : `<span class="text-slate-300">—</span>`
+                          }
                         </td>
                         <td class="py-3 px-3 text-center">${badge(t.qlvb)}</td>
                         <td class="py-3 px-3 text-center">${badge(t.pmcv)}</td>
@@ -1124,6 +1745,7 @@
             ${state.activeTab === 'admin' && u.role === 'admin' ? renderAdminTab() : ''}
           </main>
         </div>
+        ${renderQrModal()}
         ${toastHtml}
       `;
     }
