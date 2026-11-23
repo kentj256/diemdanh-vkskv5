@@ -352,52 +352,169 @@
       render();
     };
 
+    let activeMediaStream = null;
+    let qrScanLoopId = null;
+    let barcodeDetectorInstance = null;
+
     async function startCameraQr() {
       const readerEl = document.getElementById("qr-reader");
-      if (!readerEl || !window.Html5Qrcode) {
-        state.qrStatusMsg = "Không tải được thư viện quét QR. Anh có thể chọn ảnh mã QR ngày hôm nay bên dưới.";
+      if (!readerEl) return;
+
+      await stopCameraQr();
+
+      const hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+      if (!hasMediaDevices) {
+        state.qrStatusMsg = "Trình duyệt không hỗ trợ mở camera trực tiếp (cần HTTPS hoặc chọn ảnh mã QR ngày hôm nay bên dưới).";
         render();
         return;
       }
+
       try {
-        await stopCameraQr();
-        html5QrScanner = new Html5Qrcode("qr-reader");
-        await html5QrScanner.start(
-          { facingMode: "environment" },
-          { fps: 10, qrbox: { width: 220, height: 220 } },
-          async (decodedText) => {
-            const check = validateDailyQrContent(decodedText, state.selectedDate);
-            if (check.valid) {
-              await stopCameraQr();
-              state.qrModalOpen = false;
-              state.qrStatusMsg = "";
-              await recordArrivalTime(`Quét QR ngày ${state.selectedDate.split("-").reverse().join("/")}`, state.selectedDate);
-            } else {
-              state.qrStatusMsg = check.reason;
-              render();
-            }
-          },
-          () => {}
-        );
+        let stream = null;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { ideal: "environment" } },
+            audio: false
+          });
+        } catch (e1) {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: true,
+            audio: false
+          });
+        }
+
+        activeMediaStream = stream;
         isScannerRunning = true;
-        state.qrStatusMsg = `Hướng camera vào mã QR ngày ${state.selectedDate.split("-").reverse().join("/")}...`;
+
+        readerEl.innerHTML = `
+          <div class="relative w-full h-[250px] bg-black rounded-xl overflow-hidden flex items-center justify-center">
+            <video id="qr-video-preview" autoplay playsinline muted class="w-full h-full object-cover"></video>
+            <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div class="w-48 h-48 border-2 border-amber-400 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"></div>
+            </div>
+          </div>
+        `;
+
+        const videoEl = document.getElementById("qr-video-preview");
+        if (videoEl) {
+          videoEl.srcObject = stream;
+          await videoEl.play().catch(() => {});
+        }
+
+        state.qrStatusMsg = `Camera đã mở! Hướng vào mã QR ngày ${state.selectedDate.split("-").reverse().join("/")}...`;
         render();
+
+        // Gắn lại stream sau khi render nếu DOM vừa cập nhật
+        const videoAfterRender = document.getElementById("qr-video-preview");
+        if (videoAfterRender && activeMediaStream && videoAfterRender.srcObject !== activeMediaStream) {
+          videoAfterRender.srcObject = activeMediaStream;
+          await videoAfterRender.play().catch(() => {});
+        }
+
+        if ("BarcodeDetector" in window) {
+          try {
+            barcodeDetectorInstance = new BarcodeDetector({ formats: ["qr_code"] });
+          } catch (e) {
+            barcodeDetectorInstance = null;
+          }
+        }
+
+        const offCanvas = document.createElement("canvas");
+        const offCtx = offCanvas.getContext("2d", { willReadFrequently: true });
+
+        const scanFrame = async () => {
+          if (!isScannerRunning || !state.qrModalOpen) return;
+          const vid = document.getElementById("qr-video-preview");
+          if (vid && vid.readyState >= 2 && vid.videoWidth > 0 && vid.videoHeight > 0) {
+            try {
+              if (barcodeDetectorInstance) {
+                const codes = await barcodeDetectorInstance.detect(vid);
+                if (codes && codes.length > 0 && codes[0].rawValue) {
+                  await handleDecodedQrText(codes[0].rawValue);
+                  return;
+                }
+              }
+              offCanvas.width = vid.videoWidth;
+              offCanvas.height = vid.videoHeight;
+              offCtx.drawImage(vid, 0, 0, offCanvas.width, offCanvas.height);
+              if (window.Html5Qrcode) {
+                const dataUrl = offCanvas.toDataURL("image/png");
+                const blob = await (await fetch(dataUrl)).blob();
+                const file = new File([blob], "frame.png", { type: "image/png" });
+                const tempScanner = new Html5Qrcode("qr-file-temp");
+                try {
+                  const decoded = await tempScanner.scanFile(file, false);
+                  await tempScanner.clear().catch(() => {});
+                  if (decoded) {
+                    await handleDecodedQrText(decoded);
+                    return;
+                  }
+                } catch (eScan) {
+                  await tempScanner.clear().catch(() => {});
+                }
+              }
+            } catch (eLoop) {}
+          }
+          qrScanLoopId = setTimeout(scanFrame, 350);
+        };
+
+        qrScanLoopId = setTimeout(scanFrame, 300);
       } catch (err) {
-        console.warn("Camera QR start error:", err);
-        state.qrStatusMsg = "Trình duyệt chưa mở được camera (hãy cấp quyền Camera hoặc chọn ảnh mã QR ngày hôm nay bên dưới).";
+        console.warn("getUserMedia camera error:", err);
+        const errName = err?.name || "";
+        if (errName === "NotAllowedError" || errName === "PermissionDeniedError") {
+          state.qrStatusMsg = "Quyền Camera đang bị từ chối trong trình duyệt. Hãy bật lại quyền Camera ở cài đặt trình duyệt hoặc chọn ảnh mã QR bên dưới.";
+        } else if (errName === "NotReadableError" || errName === "TrackStartError") {
+          state.qrStatusMsg = "Camera đang được ứng dụng khác sử dụng hoặc không truy cập được. Anh hãy chọn ảnh mã QR bên dưới.";
+        } else {
+          state.qrStatusMsg = "Không mở được luồng camera trực tiếp trên thiết bị này. Anh có thể bấm chọn ảnh mã QR ngày hôm nay bên dưới.";
+        }
         render();
       }
     }
 
+    async function handleDecodedQrText(decodedText) {
+      const check = validateDailyQrContent(decodedText, state.selectedDate);
+      if (check.valid) {
+        await stopCameraQr();
+        state.qrModalOpen = false;
+        state.qrStatusMsg = "";
+        await recordArrivalTime(`Quét QR ngày ${state.selectedDate.split("-").reverse().join("/")}`, state.selectedDate);
+      } else {
+        state.qrStatusMsg = check.reason;
+        render();
+        const videoEl = document.getElementById("qr-video-preview");
+        if (videoEl && activeMediaStream && videoEl.srcObject !== activeMediaStream) {
+          videoEl.srcObject = activeMediaStream;
+          videoEl.play().catch(() => {});
+        }
+        if (isScannerRunning && state.qrModalOpen) {
+          qrScanLoopId = setTimeout(() => {
+            if (isScannerRunning) startCameraQr();
+          }, 1200);
+        }
+      }
+    }
+
     async function stopCameraQr() {
-      if (html5QrScanner && isScannerRunning) {
+      isScannerRunning = false;
+      if (qrScanLoopId) {
+        clearTimeout(qrScanLoopId);
+        qrScanLoopId = null;
+      }
+      if (activeMediaStream) {
+        try {
+          activeMediaStream.getTracks().forEach(track => track.stop());
+        } catch (e) {}
+        activeMediaStream = null;
+      }
+      if (html5QrScanner) {
         try {
           await html5QrScanner.stop();
           await html5QrScanner.clear();
         } catch (e) {}
+        html5QrScanner = null;
       }
-      isScannerRunning = false;
-      html5QrScanner = null;
     }
 
     window.handleQrImageUpload = async (event) => {
