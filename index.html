@@ -18,6 +18,7 @@
   <!-- QR Generator & Camera QR Scanner -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 </head>
 <body class="bg-slate-50 text-slate-800 min-h-screen">
   <div id="app"></div>
@@ -451,6 +452,21 @@
           }
           if (vid && vid.readyState >= 2 && vid.videoWidth > 0 && vid.videoHeight > 0) {
             try {
+              offCanvas.width = vid.videoWidth;
+              offCanvas.height = vid.videoHeight;
+              offCtx.drawImage(vid, 0, 0, offCanvas.width, offCanvas.height);
+
+              if (typeof window.jsQR === "function") {
+                const imgData = offCtx.getImageData(0, 0, offCanvas.width, offCanvas.height);
+                const qrRes = window.jsQR(imgData.data, imgData.width, imgData.height, {
+                  inversionAttempts: "attemptBoth"
+                });
+                if (qrRes && qrRes.data) {
+                  await handleDecodedQrText(qrRes.data);
+                  return;
+                }
+              }
+
               if (barcodeDetectorInstance) {
                 const codes = await barcodeDetectorInstance.detect(vid);
                 if (codes && codes.length > 0 && codes[0].rawValue) {
@@ -458,27 +474,9 @@
                   return;
                 }
               }
-              offCanvas.width = vid.videoWidth;
-              offCanvas.height = vid.videoHeight;
-              offCtx.drawImage(vid, 0, 0, offCanvas.width, offCanvas.height);
-              if (window.Html5Qrcode) {
-                if (!fileQrScannerInstance) {
-                  fileQrScannerInstance = new Html5Qrcode("qr-file-temp", false);
-                }
-                const dataUrl = offCanvas.toDataURL("image/png");
-                const blob = await (await fetch(dataUrl)).blob();
-                const file = new File([blob], "frame.png", { type: "image/png" });
-                try {
-                  const decoded = await fileQrScannerInstance.scanFile(file, false);
-                  if (decoded) {
-                    await handleDecodedQrText(decoded);
-                    return;
-                  }
-                } catch (eScan) {}
-              }
             } catch (eLoop) {}
           }
-          qrScanLoopId = setTimeout(scanFrame, 400);
+          qrScanLoopId = setTimeout(scanFrame, 180);
         };
 
         qrScanLoopId = setTimeout(scanFrame, 350);
@@ -580,7 +578,6 @@
       renderUnitQrCodeBox();
     };
 
-    // Bộ tạo mã QR chuẩn (Version 6, Error Correction L) chạy trực tiếp nội bộ, không phụ thuộc CDN ngoài
     const QR_GF_EXP = new Uint8Array(512);
     const QR_GF_LOG = new Uint8Array(256);
     (() => {
@@ -634,7 +631,6 @@
       return buf.slice(data.length);
     }
 
-    // Version 10-L: 57x57 modules, 274 data codewords (274 bytes), 2x68 + 2x69 data codewords, 26 EC per block (104 EC codewords)
     function generateQrMatrixV10L(text) {
       const size = 57;
       const bytes = new TextEncoder().encode(text);
@@ -646,7 +642,6 @@
         }
       };
 
-      // Byte mode indicator = 0100, char count = 16 bits for V10 byte mode
       pushBits(0b0100, 4);
       pushBits(bytes.length, 16);
       for (let i = 0; i < bytes.length; i++) {
@@ -719,7 +714,6 @@
       placeFinder(0, size - 7);
       placeFinder(size - 7, 0);
 
-      // Alignment patterns for V10 centered at [6, 26, 46]
       const alignCenters = [6, 26, 46];
       for (const rC of alignCenters) {
         for (const cC of alignCenters) {
@@ -736,7 +730,6 @@
         }
       }
 
-      // Timing patterns
       for (let i = 8; i < size - 8; i++) {
         const val = i % 2 === 0 ? 1 : 0;
         if (!reserved[6][i]) {
@@ -749,11 +742,9 @@
         }
       }
 
-      // Dark module at (4*10 + 9, 8) = (49, 8)
       matrix[49][8] = 1;
       reserved[49][8] = true;
 
-      // Reserve format info cells around finders
       for (let i = 0; i < 9; i++) {
         reserved[8][i] = true;
         reserved[i][8] = true;
@@ -763,7 +754,6 @@
         reserved[size - 1 - i][8] = true;
       }
 
-      // Reserve 18-bit version info cells
       for (let r = 0; r < 6; r++) {
         for (let c = size - 11; c < size - 8; c++) {
           reserved[r][c] = true;
@@ -775,7 +765,6 @@
         }
       }
 
-      // Data bit stream placement (mask 0: (r + c) % 2 === 0)
       const streamBits = [];
       for (const cw of finalCodewords) {
         for (let b = 7; b >= 0; b--) {
@@ -799,7 +788,6 @@
         dir = -dir;
       }
 
-      // Format string for ECL L (01) and Mask 0 (000)
       const fmtBits = [1,1,1,0,1,1,1,1,1,0,0,0,1,0,0];
       const topLeftCoords = [
         [0,8],[1,8],[2,8],[3,8],[4,8],[5,8],[7,8],[8,8],
@@ -816,7 +804,6 @@
         matrix[size - 15 + i][8] = fmtBits[i];
       }
 
-      // Version 10 info bits (18 bits)
       const verBits = [0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1];
       for (let r = 0; r < 6; r++) {
         for (let c = size - 11; c < size - 8; c++) {
@@ -1437,7 +1424,6 @@
       return `
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div class="lg:col-span-2 space-y-4">
-            <!-- Thẻ Quét mã QR chấm báo giờ đến theo ngày -->
             <div class="bg-white rounded-2xl p-4 sm:p-5 shadow-sm border ${arrival.checked ? 'border-emerald-300 bg-emerald-50/30' : 'border-blue-200 bg-blue-50/30'}">
               <div class="flex flex-wrap items-center justify-between gap-4">
                 <div class="flex items-start gap-3.5">
@@ -1545,7 +1531,7 @@
                             Lưu kết quả & Điểm danh mục #4
                           </button>
                           <button onclick="quickNoOverdue()"
-                            class="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
+                            class="px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold transition">
                             Điền nhanh: Không có án quá hạn
                           </button>
                         </div>
@@ -1680,7 +1666,6 @@
 
       return `
         <div class="space-y-5">
-          <!-- Khối Mã QR Báo Giờ Đến Thay Đổi Theo Từng Ngày -->
           <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200">
             <div class="grid grid-cols-1 md:grid-cols-3 gap-5 items-center">
               <div class="flex flex-col items-center justify-center p-4 rounded-2xl bg-slate-50 border border-slate-200">
