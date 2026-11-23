@@ -386,29 +386,39 @@
         activeMediaStream = stream;
         isScannerRunning = true;
 
-        readerEl.innerHTML = `
-          <div class="relative w-full h-[250px] bg-black rounded-xl overflow-hidden flex items-center justify-center">
-            <video id="qr-video-preview" autoplay playsinline muted class="w-full h-full object-cover"></video>
-            <div class="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div class="w-48 h-48 border-2 border-amber-400 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"></div>
+        state.qrStatusMsg = `Camera đã mở! Hướng vào mã QR ngày ${state.selectedDate.split("-").reverse().join("/")}...`;
+        render();
+
+        const readerAfterRender = document.getElementById("qr-reader");
+        if (!readerAfterRender) return;
+
+        readerAfterRender.innerHTML = `
+          <div class="relative w-full h-[250px] bg-slate-900 rounded-xl overflow-hidden flex items-center justify-center">
+            <video id="qr-video-preview" autoplay playsinline muted webkit-playsinline class="w-full h-full object-cover"></video>
+            <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+              <div class="w-44 h-44 border-2 border-amber-400 rounded-2xl bg-transparent"></div>
+              <span class="mt-2 px-2.5 py-0.5 rounded-full bg-black/65 text-[11px] text-amber-300 font-medium">Đưa mã QR vào khung</span>
             </div>
           </div>
         `;
 
         const videoEl = document.getElementById("qr-video-preview");
         if (videoEl) {
+          videoEl.setAttribute("autoplay", "");
+          videoEl.setAttribute("playsinline", "");
+          videoEl.setAttribute("webkit-playsinline", "");
+          videoEl.muted = true;
           videoEl.srcObject = stream;
+          await new Promise((resolve) => {
+            if (videoEl.readyState >= 1) return resolve();
+            const onMeta = () => {
+              videoEl.removeEventListener("loadedmetadata", onMeta);
+              resolve();
+            };
+            videoEl.addEventListener("loadedmetadata", onMeta);
+            setTimeout(resolve, 600);
+          });
           await videoEl.play().catch(() => {});
-        }
-
-        state.qrStatusMsg = `Camera đã mở! Hướng vào mã QR ngày ${state.selectedDate.split("-").reverse().join("/")}...`;
-        render();
-
-        // Gắn lại stream sau khi render nếu DOM vừa cập nhật
-        const videoAfterRender = document.getElementById("qr-video-preview");
-        if (videoAfterRender && activeMediaStream && videoAfterRender.srcObject !== activeMediaStream) {
-          videoAfterRender.srcObject = activeMediaStream;
-          await videoAfterRender.play().catch(() => {});
         }
 
         if ("BarcodeDetector" in window) {
